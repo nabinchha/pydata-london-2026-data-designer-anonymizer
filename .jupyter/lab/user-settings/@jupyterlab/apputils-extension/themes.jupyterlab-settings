@@ -1,0 +1,5 @@
+{
+  "adaptive-theme": false,
+  "theme": "JupyterLab Dark",
+  "theme-scrollbars": true
+}
