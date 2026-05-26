@@ -1,0 +1,38 @@
+[project]
+name = "pydata-london-2026-data-designer-anonymizer"
+version = "0.1.0"
+description = "Hands-on synthetic data pipeline workshop with NeMo Data Designer and NeMo Anonymizer (PyData London 2026)"
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+license = { text = "Apache-2.0" }
+authors = [
+    { name = "Nabin Mulepati", email = "nmulepati@nvidia.com" },
+]
+
+dependencies = [
+    "data-designer>=0.6.1",
+    "nemo-anonymizer>=0.2.1",
+    "openai>=1.50",         # used by smoke_test.py to ping provider endpoints
+    "ipykernel>=6.29",
+    "ipywidgets>=8.1",
+    "jupyterlab>=4.2",
+    "pandas>=2.2",
+    "pyarrow>=18.0",
+    "python-dotenv>=1.0",
+    "rich>=13.9",
+]
+
+[dependency-groups]
+dev = [
+    "nbclient>=0.10",
+    "nbformat>=5.10",
+    "ruff>=0.7",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+ignore = ["E501"]
