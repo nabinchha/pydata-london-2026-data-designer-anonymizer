@@ -193,15 +193,17 @@ def environment_setup(provider: str = "auto") -> ProviderConfig:
 # ─── Data Designer model providers ───────────────────────────────────────────
 
 
-def build_dd_model_setup(provider: ProviderConfig):
-    """Return ([model_providers], [model_configs]) wired to the detected provider.
+def build_model_providers(provider: ProviderConfig):
+    """Return the shared ``list[ModelProvider]`` used by *both* DD and Anonymizer.
 
-    Used by every notebook that calls an LLM/VLM column. Keeps
-    inference_parameters in one place so we can tune them workshop-wide.
+    ``anonymizer.ModelProvider`` is literally re-exported from
+    ``data_designer.config.models`` -- the same class. So the same provider list
+    works for ``DataDesigner(model_providers=...)`` and
+    ``Anonymizer(model_providers=...)`` without translation.
     """
     import data_designer.config as dd
 
-    model_providers = [
+    return [
         dd.ModelProvider(
             name=provider.provider_name,
             endpoint=provider.endpoint,
@@ -210,8 +212,32 @@ def build_dd_model_setup(provider: ProviderConfig):
         ),
     ]
 
+
+def build_dd_model_setup(provider: ProviderConfig):
+    """Return ([model_providers], [model_configs]) wired to the detected provider.
+
+    Used by every notebook that calls an LLM/VLM column. Keeps
+    inference_parameters in one place so we can tune them workshop-wide.
+
+    On NVIDIA Build the default text model (``nemotron-3-super-120b-a12b``)
+    is a reasoning model with ``enable_thinking=True`` by default. For
+    declarative generation tasks (text, structured outputs, multi-turn JSON
+    traces) the chain-of-thought adds latency and -- worse -- often leaks
+    meta-commentary into the content field ("We need to produce JSON
+    with..."). We disable thinking on this provider; users can re-enable
+    it per-column with a custom ``ChatCompletionInferenceParams`` if they
+    want it back.
+    """
+    import data_designer.config as dd
+
+    model_providers = build_model_providers(provider)
+
+    extra_body: dict | None = None
+    if provider.provider_name == "nvidia-build":
+        extra_body = {"chat_template_kwargs": {"enable_thinking": False}}
+
     def chat_inference_params(model: str, *, temperature: float | None = None):
-        params = {
+        params: dict = {
             "timeout": 120,
             "max_parallel_requests": 8,
         }
@@ -219,6 +245,8 @@ def build_dd_model_setup(provider: ProviderConfig):
             params["extra_body"] = {"max_completion_tokens": 4096}
         else:
             params["max_tokens"] = 4096
+            if extra_body:
+                params["extra_body"] = extra_body
         if temperature is not None:
             params["temperature"] = temperature
         return dd.ChatCompletionInferenceParams(**params)
@@ -248,6 +276,122 @@ def build_dd_model_setup(provider: ProviderConfig):
         ),
     ]
     return model_providers, model_configs
+
+
+# ─── Anonymizer model providers ──────────────────────────────────────────────
+
+
+_NVIDIA_BUILD_ANONYMIZER_YAML = """\
+model_configs:
+  - alias: gliner-pii-detector
+    model: nvidia/gliner-pii
+    provider: nvidia-build
+    inference_parameters:
+      max_parallel_requests: 1
+      timeout: 120
+
+  - alias: gpt-oss-120b
+    model: openai/gpt-oss-120b
+    provider: nvidia-build
+    inference_parameters:
+      max_parallel_requests: 16
+      max_tokens: 16384
+      temperature: 0.3
+      top_p: 0.95
+      timeout: 300
+
+  - alias: nemotron-30b-thinking
+    model: nvidia/nemotron-3-nano-30b-a3b
+    provider: nvidia-build
+    inference_parameters:
+      max_parallel_requests: 16
+      max_tokens: 8192
+      temperature: 0.4
+      top_p: 1.0
+      timeout: 300
+
+selected_models:
+  detection:
+    entity_detector: gliner-pii-detector
+    entity_validator: [gpt-oss-120b]
+    entity_augmenter: gpt-oss-120b
+    latent_detector: nemotron-30b-thinking
+  replace:
+    replacement_generator: gpt-oss-120b
+  rewrite:
+    domain_classifier: gpt-oss-120b
+    disposition_analyzer: gpt-oss-120b
+    meaning_extractor: gpt-oss-120b
+    qa_generator: gpt-oss-120b
+    rewriter: gpt-oss-120b
+    evaluator: gpt-oss-120b
+    repairer: gpt-oss-120b
+    judge: gpt-oss-120b
+"""
+
+
+def build_anonymizer_model_setup(provider: ProviderConfig):
+    """Return ``(model_providers, model_configs_yaml)`` ready for ``Anonymizer(...)``.
+
+    Anonymizer takes ``model_configs`` as a YAML *string or path* (not a list of
+    ``ModelConfig`` objects the way DD does) -- it has a richer schema with
+    ``selected_models`` blocks naming which alias plays each detector / validator
+    / replacer / rewriter role. We render that YAML programmatically so the
+    aliases stay in sync with whatever provider the notebook resolved.
+
+    On **NVIDIA Build** we mirror Anonymizer's bundled-default config:
+
+    - GLiNER (``nvidia/gliner-pii``) for entity detection.
+    - ``openai/gpt-oss-120b`` for validator / augmenter / replacement /
+      rewriter -- it is instruction-tuned to emit JSON inside ```json
+      markdown fences, which Anonymizer's internal prompts expect. The DD
+      generation model (``nemotron-3-super-120b-a12b``) does not follow
+      that fence convention reliably with ``enable_thinking=False`` and
+      fails Anonymizer's parser.
+
+    On **other providers** (OpenRouter / OpenAI) the bundled-default models
+    are not available, so we fall back to a chat-only config that uses the
+    provider's text model for every Anonymizer role. Detection quality may
+    degrade without GLiNER and the chat model may not match Anonymizer's
+    fence-prompt assumptions; treat that as an "advanced configuration"
+    workshop exercise rather than a turnkey path.
+    """
+    model_providers = build_model_providers(provider)
+
+    if provider.provider_name == "nvidia-build":
+        return model_providers, _NVIDIA_BUILD_ANONYMIZER_YAML
+
+    chat_alias = provider.text_alias
+    config_lines = [
+        "model_configs:",
+        f"  - alias: {chat_alias}",
+        f"    model: {provider.text_model}",
+        f"    provider: {provider.provider_name}",
+        "    inference_parameters:",
+        "      max_parallel_requests: 8",
+        "      max_tokens: 4096",
+        "      temperature: 0.3",
+        "      timeout: 300",
+        "",
+        "selected_models:",
+        "  detection:",
+        f"    entity_detector: {chat_alias}",
+        f"    entity_validator: [{chat_alias}]",
+        f"    entity_augmenter: {chat_alias}",
+        f"    latent_detector: {chat_alias}",
+        "  replace:",
+        f"    replacement_generator: {chat_alias}",
+        "  rewrite:",
+        f"    domain_classifier: {chat_alias}",
+        f"    disposition_analyzer: {chat_alias}",
+        f"    meaning_extractor: {chat_alias}",
+        f"    qa_generator: {chat_alias}",
+        f"    rewriter: {chat_alias}",
+        f"    evaluator: {chat_alias}",
+        f"    repairer: {chat_alias}",
+        f"    judge: {chat_alias}",
+    ]
+    return model_providers, "\n".join(config_lines) + "\n"
 
 
 
@@ -345,34 +489,6 @@ def display_image_with_qa(
     display(HTML(html))
 
 
-# ─── Anonymizer side-by-side display (Notebook 3) ────────────────────────────
-
-
-def display_anonymizer_comparison(
-    original: list[str],
-    by_strategy: dict[str, list[str]],
-    max_rows: int = 5,
-) -> None:
-    """Render original vs each strategy's output for visual comparison."""
-    console = Console()
-    rows = min(max_rows, len(original))
-    for i in range(rows):
-        table = Table(
-            title=f"[bold]Row {i + 1}[/]",
-            border_style="dim",
-            show_lines=True,
-            title_style="",
-        )
-        table.add_column("Strategy", style=_COLORS["nv_green"], no_wrap=True)
-        table.add_column("Output")
-        table.add_row("[bold]ORIGINAL[/]", original[i])
-        for strategy, outputs in by_strategy.items():
-            if i < len(outputs):
-                table.add_row(strategy, outputs[i])
-        console.print(table)
-        print()
-
-
 # ─── Seed data loading helpers ───────────────────────────────────────────────
 
 
@@ -388,6 +504,37 @@ def load_wiki_excerpts(limit: int | None = None) -> pd.DataFrame:
     if limit:
         df = df.head(limit)
     return df
+
+
+def load_usage_logs_seed() -> pd.DataFrame:
+    """Load synthetic business-document VLM deployment logs (checked into the repo).
+
+    Each row represents one user interaction with a hypothetical deployment
+    of a rich-business-document VLM (the kind whose training data Notebook 2
+    produces from ``data/rich_document_seed.parquet``). Three text columns
+    teach the "PII at four surfaces" point:
+
+    - ``system_prompt`` -- application-built system message naming the
+      authenticated user (name, email, employer, role, project codename,
+      colleagues).
+    - ``attached_document_context`` -- plain-text rendering of one
+      uploaded business document (clinical trial status report, financial
+      variance memo, market research brief, product launch readiness plan,
+      operations dashboard export, or customer support incident review).
+    - ``conversation_trace`` -- a multi-turn ChatML JSON string with user
+      messages, assistant tool calls (with JSON arguments), and tool-result
+      messages (with JSON returned by the model's tools).
+
+    Generated by ``bonus_generate_usage_logs.ipynb``.
+    """
+    path = DATA_DIR / "usage_logs_seed.parquet"
+    if not path.exists():
+        raise FileNotFoundError(
+            f"{path.relative_to(REPO_ROOT)} missing. "
+            f"Run notebooks/bonus_generate_usage_logs.ipynb to regenerate it, "
+            f"or pull from the repo (it should be checked in)."
+        )
+    return pd.read_parquet(path)
 
 
 def load_document_seed() -> pd.DataFrame:
@@ -437,12 +584,14 @@ __all__ = [
     "DATA_DIR",
     "REPO_ROOT",
     "ProviderConfig",
+    "build_anonymizer_model_setup",
     "build_dd_model_setup",
-    "display_anonymizer_comparison",
+    "build_model_providers",
     "display_base64_image",
     "display_image_with_qa",
     "environment_setup",
     "load_document_seed",
+    "load_usage_logs_seed",
     "load_wiki_excerpts",
     "show_provider_info",
 ]

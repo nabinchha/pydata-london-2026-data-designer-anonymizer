@@ -11,7 +11,7 @@ authors = [
 
 dependencies = [
     "data-designer>=0.6.0",
-    "nemo-anonymizer>=0.2.0",
+    "nemo-anonymizer==0.2.0",
     "openai>=1.50",         # used by smoke_test.py to ping provider endpoints
     "ipykernel>=6.29",
     "jupyterlab>=4.2",

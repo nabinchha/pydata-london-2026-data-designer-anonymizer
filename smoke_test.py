@@ -48,6 +48,7 @@ PROVIDER_CONFIG = {
 
 EXPECTED_SEED_FILES = (
     REPO_ROOT / "data" / "wiki_seed.parquet",
+    REPO_ROOT / "data" / "usage_logs_seed.parquet",
     REPO_ROOT / "data" / "rich_document_seed.parquet",  # checked in, not fetched
 )
 

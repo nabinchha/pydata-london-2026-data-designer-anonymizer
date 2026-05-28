@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 2
 requires-python = ">=3.11, <3.14"
 resolution-markers = [
     "python_full_version >= '3.12'",
@@ -2004,7 +2004,7 @@ requires-dist = [
     { name = "data-designer", specifier = ">=0.6.0" },
     { name = "ipykernel", specifier = ">=6.29" },
     { name = "jupyterlab", specifier = ">=4.2" },
-    { name = "nemo-anonymizer", specifier = ">=0.2.0" },
+    { name = "nemo-anonymizer", specifier = "==0.2.0" },
     { name = "openai", specifier = ">=1.50" },
     { name = "pandas", specifier = ">=2.2" },
     { name = "pyarrow", specifier = ">=18.0" },
