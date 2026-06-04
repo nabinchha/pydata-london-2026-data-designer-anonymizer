@@ -284,24 +284,190 @@ def build_dd_model_setup(provider: ProviderConfig):
 _BREV_GLINER_ENDPOINT = "https://gliner-qaqtckhiy.brevlab.com/v1"
 _BREV_GLINER_PROVIDER_NAME = "nvidia/gliner-pii"
 
-# Anonymizer LLM models per non-Build provider (separate from ``_PROVIDER_REGISTRY``).
-# OpenRouter uses ``openai/gpt-oss-120b`` on OpenRouter for parity with the NVIDIA Build
-# recipe (same model id and inference params as ``_NVIDIA_BUILD_ANONYMIZER_YAML``).
-_ANONYMIZER_CHAT_ALIAS = "gpt-oss-120b"
-_ANONYMIZER_CHAT_BY_PROVIDER: dict[str, str] = {
+# ─── Anonymizer model pool (Notebook 3 — Substitute only) ───────────────────
+#
+# Two LLM aliases in ``model_configs``; roles in ``selected_models`` point at them.
+# Rewrite mode is not configured here — bundled defaults apply if ever enabled.
+#
+# Role mapping (workshop):
+#   entity_validator        → gpt-oss-120b
+#   entity_augmenter        → gpt-oss-120b
+#   replacement_generator   → gpt-oss-120b
+#   latent_detector         → gpt-oss-120b
+#   evaluate.*_judge        → per provider (see ``_ANON_MODEL_ID_EVAL_JUDGE``)
+
+_ANON_ALIAS_GPT_OSS = "gpt-oss-120b"
+_ANON_ALIAS_EVAL_JUDGE = "eval-judge"
+
+_ANON_MODEL_ID_GPT_OSS: dict[str, str] = {
+    "nvidia-build": "openai/gpt-oss-120b",
     "openrouter": "openai/gpt-oss-120b",
     "openai": "gpt-5.4",
 }
-_ANONYMIZER_GPT_OSS_INFERENCE = """\
+# Nemotron 3 Ultra for eval judges (Kimi K2.6 hit Build/OpenRouter rate limits).
+_ANON_MODEL_ID_EVAL_JUDGE: dict[str, str] = {
+    "nvidia-build": "nvidia/nemotron-3-ultra-550b-a55b",
+    "openrouter": "nvidia/nemotron-3-ultra-550b-a55b:free",
+    "openai": "gpt-5.4",
+}
+
+_ANON_INFERENCE_GPT_OSS = """\
       max_parallel_requests: 16
       max_tokens: 16384
       temperature: 0.3
       top_p: 0.95
       timeout: 300"""
-_ANONYMIZER_OPENAI_INFERENCE = """\
+_ANON_INFERENCE_OPENAI = """\
       max_parallel_requests: 1
       temperature: 0.3
       timeout: 300"""
+# Eval judges: structured JSON; lower parallelism to ease rate limits on evaluate().
+_ANON_INFERENCE_NEMOTRON_ULTRA_EVAL_JUDGE_BUILD = """\
+      max_parallel_requests: 4
+      max_tokens: 16384
+      temperature: 0.3
+      top_p: 0.95
+      timeout: 300
+      extra_body:
+        chat_template_kwargs:
+          enable_thinking: false"""
+_ANON_INFERENCE_NEMOTRON_ULTRA_EVAL_JUDGE_OPENROUTER = """\
+      max_parallel_requests: 4
+      max_tokens: 16384
+      temperature: 0.3
+      top_p: 0.95
+      timeout: 300
+      extra_body:
+        reasoning:
+          effort: none"""
+
+
+def _anon_model_id(alias: str, provider: ProviderConfig) -> str:
+    registries = {
+        _ANON_ALIAS_GPT_OSS: _ANON_MODEL_ID_GPT_OSS,
+        _ANON_ALIAS_EVAL_JUDGE: _ANON_MODEL_ID_EVAL_JUDGE,
+    }
+    try:
+        return registries[alias][provider.provider_name]
+    except KeyError as exc:
+        if alias not in registries:
+            raise ValueError(f"Unknown Anonymizer alias {alias!r}") from None
+        raise ValueError(
+            f"No Anonymizer model id for alias {alias!r} on provider "
+            f"{provider.provider_name!r}."
+        ) from exc
+
+
+def _anon_inference_block(provider: ProviderConfig, model_id: str) -> str:
+    if provider.provider_name == "openai" and model_id == "gpt-5.4":
+        return _ANON_INFERENCE_OPENAI
+    if model_id == "openai/gpt-oss-120b":
+        return _ANON_INFERENCE_GPT_OSS
+    if "nemotron-3-ultra" in model_id:
+        if provider.provider_name == "nvidia-build":
+            return _ANON_INFERENCE_NEMOTRON_ULTRA_EVAL_JUDGE_BUILD
+        return _ANON_INFERENCE_NEMOTRON_ULTRA_EVAL_JUDGE_OPENROUTER
+    return (
+        "      max_parallel_requests: 8\n"
+        "      max_tokens: 16384\n"
+        "      temperature: 0.3\n"
+        "      timeout: 300"
+    )
+
+
+def _anon_model_config_lines(
+    *,
+    alias: str,
+    provider: ProviderConfig,
+    extra_lines: list[str] | None = None,
+    skip_health_check: bool = False,
+) -> list[str]:
+    model_id = _anon_model_id(alias, provider)
+    lines = [
+        f"  - alias: {alias}",
+    ]
+    if skip_health_check:
+        lines.append("    skip_health_check: true")
+    lines.extend(
+        [
+            f"    model: {model_id}",
+            f"    provider: {provider.provider_name}",
+            "    inference_parameters:",
+            *_anon_inference_block(provider, model_id).splitlines(),
+        ]
+    )
+    if extra_lines:
+        lines.extend(extra_lines)
+    return lines
+
+
+def _build_anonymizer_yaml(provider: ProviderConfig) -> str:
+    """YAML model pool + ``selected_models`` for Substitute (detection + replace)."""
+    gpt_oss = _ANON_ALIAS_GPT_OSS
+    eval_judge = _ANON_ALIAS_EVAL_JUDGE
+
+    if provider.provider_name == "nvidia-build":
+        gliner_provider = "nvidia-build"
+    else:
+        gliner_provider = _BREV_GLINER_PROVIDER_NAME
+
+    openai_extra: list[str] = []
+    if provider.provider_name == "openai":
+        openai_extra = [
+            "      extra_body:",
+            "        max_completion_tokens: 4096",
+        ]
+
+    lines = [
+        "model_configs:",
+        "  - alias: gliner-pii-detector",
+        "    model: nvidia/gliner-pii",
+        f"    provider: {gliner_provider}",
+        "    inference_parameters:",
+        "      max_parallel_requests: 1",
+        "      timeout: 120",
+        "",
+        *_anon_model_config_lines(
+            alias=gpt_oss,
+            provider=provider,
+            extra_lines=openai_extra or None,
+        ),
+        "",
+        # Eval judges run only inside ``evaluate()``; skip DD's startup probe.
+        *_anon_model_config_lines(
+            alias=eval_judge,
+            provider=provider,
+            skip_health_check=True,
+        ),
+        "",
+        "selected_models:",
+        "  detection:",
+        "    entity_detector: gliner-pii-detector",
+        f"    entity_validator: [{gpt_oss}]",
+        f"    entity_augmenter: {gpt_oss}",
+        f"    latent_detector: {gpt_oss}",
+        "  replace:",
+        f"    replacement_generator: {gpt_oss}",
+        "  evaluate:",
+        f"    detection_validity_judge: {eval_judge}",
+        f"    replace_type_fidelity_judge: {eval_judge}",
+        f"    replace_relational_consistency_judge: {eval_judge}",
+        f"    replace_attribute_fidelity_judge: {eval_judge}",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def _anonymizer_gpt_oss_model(provider: ProviderConfig) -> str:
+    return _anon_model_id(_ANON_ALIAS_GPT_OSS, provider)
+
+
+def _anonymizer_eval_judge_model(provider: ProviderConfig) -> str:
+    return _anon_model_id(_ANON_ALIAS_EVAL_JUDGE, provider)
+
+
+def _anonymizer_kimi_model(provider: ProviderConfig) -> str:
+    """Back-compat alias for benchmark scripts."""
+    return _anonymizer_eval_judge_model(provider)
 
 
 def _brev_gliner_provider():
@@ -313,47 +479,6 @@ def _brev_gliner_provider():
         endpoint=_BREV_GLINER_ENDPOINT,
         provider_type="openai",
     )
-
-
-_NVIDIA_BUILD_ANONYMIZER_YAML = """\
-model_configs:
-  - alias: gliner-pii-detector
-    model: nvidia/gliner-pii
-    provider: nvidia-build
-    inference_parameters:
-      max_parallel_requests: 1
-      timeout: 120
-
-  - alias: gpt-oss-120b
-    model: openai/gpt-oss-120b
-    provider: nvidia-build
-    inference_parameters:
-      max_parallel_requests: 16
-      max_tokens: 16384
-      temperature: 0.3
-      top_p: 0.95
-      timeout: 300
-
-selected_models:
-  detection:
-    entity_detector: gliner-pii-detector
-    entity_validator: [gpt-oss-120b]
-    entity_augmenter: gpt-oss-120b
-  replace:
-    replacement_generator: gpt-oss-120b
-"""
-
-
-def _anonymizer_chat_model(provider: ProviderConfig) -> str:
-    """Return the chat model id for Anonymizer LLM stages on this provider."""
-    try:
-        return _ANONYMIZER_CHAT_BY_PROVIDER[provider.provider_name]
-    except KeyError:
-        raise ValueError(
-            f"No Anonymizer chat model configured for provider "
-            f"{provider.provider_name!r}. Add it to _ANONYMIZER_CHAT_BY_PROVIDER "
-            f"in notebook_helpers.py."
-        ) from None
 
 
 def build_anonymizer_model_providers(provider: ProviderConfig):
@@ -377,90 +502,18 @@ def build_anonymizer_model_providers(provider: ProviderConfig):
     return providers
 
 
-def _non_build_anonymizer_yaml(provider: ProviderConfig) -> str:
-    """YAML for OpenRouter / OpenAI: Brev GLiNER + one chat model for all LLM stages."""
-    chat_model = _anonymizer_chat_model(provider)
-    alias = _ANONYMIZER_CHAT_ALIAS
-    # ``latent_detector`` and ``rewrite`` aliases satisfy the config schema; Substitute-only
-    # runs never call them (see ``tag_latent_entities=config.rewrite is not None``).
-    max_tokens = 16384
-    extra_lines: list[str] = []
-    if provider.provider_name == "openai" and chat_model == "gpt-5.4":
-        extra_lines = [
-            "      extra_body:",
-            "        max_completion_tokens: 4096",
-        ]
-        inference_block = _ANONYMIZER_OPENAI_INFERENCE
-    elif chat_model == "openai/gpt-oss-120b":
-        inference_block = _ANONYMIZER_GPT_OSS_INFERENCE
-    else:
-        inference_block = f"      max_tokens: {max_tokens}\n      temperature: 0.3\n      timeout: 300"
-
-    lines = [
-        "model_configs:",
-        "  - alias: gliner-pii-detector",
-        "    model: nvidia/gliner-pii",
-        f"    provider: {_BREV_GLINER_PROVIDER_NAME}",
-        "    inference_parameters:",
-        "      max_parallel_requests: 1",
-        "      timeout: 120",
-        "",
-        f"  - alias: {alias}",
-        f"    model: {chat_model}",
-        f"    provider: {provider.provider_name}",
-        "    inference_parameters:",
-        *(inference_block.splitlines() if inference_block else []),
-        *extra_lines,
-        *(
-            []
-            if inference_block or extra_lines
-            else ["      max_parallel_requests: 8", f"      max_tokens: {max_tokens}", "      temperature: 0.3", "      timeout: 300"]
-        ),
-        "",
-        "selected_models:",
-        "  detection:",
-        "    entity_detector: gliner-pii-detector",
-        f"    entity_validator: [{alias}]",
-        f"    entity_augmenter: {alias}",
-        f"    latent_detector: {alias}",
-        "  replace:",
-        f"    replacement_generator: {alias}",
-        "  rewrite:",
-        f"    domain_classifier: {alias}",
-        f"    disposition_analyzer: {alias}",
-        f"    meaning_extractor: {alias}",
-        f"    qa_generator: {alias}",
-        f"    rewriter: {alias}",
-        f"    evaluator: {alias}",
-        f"    repairer: {alias}",
-        f"    judge: {alias}",
-    ]
-    return "\n".join(lines) + "\n"
-
-
 def build_anonymizer_model_setup(provider: ProviderConfig):
     """Return ``(model_providers, model_configs_yaml)`` ready for ``Anonymizer(...)``.
 
-    Anonymizer takes ``model_configs`` as a YAML *string or path* (not a list of
-    ``ModelConfig`` objects the way DD does) -- it has a richer schema with
-    ``selected_models`` blocks naming which alias plays each detector / validator
-    / replacer / rewriter role.
+    Substitute-only workshop mapping:
 
-    **NVIDIA Build** (recommended): GLiNER + ``openai/gpt-oss-120b`` on Build.
-    ``gpt-oss-120b`` follows Anonymizer's ```json fence prompts and keeps
-    Notebook 3 separate from the Nemotron Data Designer defaults.
+    - **Validator / augmenter / substitutions** → ``gpt-oss-120b`` (``gpt-5.4`` on OpenAI)
+    - **Eval judges** → Nemotron 3 Ultra (``gpt-5.4`` on OpenAI)
 
-    **OpenRouter**: Brev GLiNER + ``openai/gpt-oss-120b`` on OpenRouter (parity with Build).
-
-    **OpenAI**: Brev GLiNER + ``gpt-5.4`` (only GPT-family models are available
-    on api.openai.com).
+    Rewrite roles are not configured; bundled defaults apply if ever enabled.
     """
     model_providers = build_anonymizer_model_providers(provider)
-
-    if provider.provider_name == "nvidia-build":
-        return model_providers, _NVIDIA_BUILD_ANONYMIZER_YAML
-
-    return model_providers, _non_build_anonymizer_yaml(provider)
+    return model_providers, _build_anonymizer_yaml(provider)
 
 
 _COLORS = {
