@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from html import escape
 from pathlib import Path
 
+import data_designer.config as dd
 import pandas as pd
 from dotenv import load_dotenv
 from IPython.display import HTML, display
@@ -45,8 +46,8 @@ class ProviderConfig:
     api_key: str
     endpoint: str
     provider_name: str
-    text_model: str
-    vlm_model: str
+    model_providers: list[dd.ModelProvider]
+    model_configs: list[dd.ModelConfig]
     text_alias: str = "text-llm"
     judge_alias: str = "judge-llm"
     vlm_alias: str = "vlm"
@@ -56,20 +57,14 @@ _PROVIDER_REGISTRY: dict[str, dict[str, str]] = {
     "NVIDIA_API_KEY": {
         "endpoint": "https://integrate.api.nvidia.com/v1",
         "provider_name": "nvidia-build",
-        "text_model": "nvidia/nemotron-3-super-120b-a12b",
-        "vlm_model": "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
     },
     "OPENROUTER_API_KEY": {
         "endpoint": "https://openrouter.ai/api/v1",
         "provider_name": "openrouter",
-        "text_model": "qwen/qwen3.6-flash",
-        "vlm_model": "qwen/qwen3.6-flash",
     },
     "OPENAI_API_KEY": {
         "endpoint": "https://api.openai.com/v1",
         "provider_name": "openai",
-        "text_model": "gpt-5.4",
-        "vlm_model": "gpt-5.4",
     },
 }
 
@@ -85,15 +80,146 @@ _PROVIDER_ALIASES: dict[str, str] = {
 _VALID_PROVIDER_NAMES = ("auto", *_PROVIDER_ALIASES)
 
 
+def _nvidia_build_model_configs() -> list[dd.ModelConfig]:
+    """Ready-to-use Data Designer model configs for NVIDIA Build."""
+    return [
+        dd.ModelConfig(
+            alias="text-llm",
+            model="nvidia/nemotron-3-super-120b-a12b",
+            provider="nvidia-build",
+            inference_parameters=dd.ChatCompletionInferenceParams(
+                timeout=120,
+                max_tokens=4096,
+                max_parallel_requests=8,
+                temperature=1.0,
+                top_p=0.95,
+                extra_body={"reasoning_effort": "medium"},
+            ),
+        ),
+        dd.ModelConfig(
+            alias="judge-llm",
+            model="nvidia/nemotron-3-super-120b-a12b",
+            provider="nvidia-build",
+            inference_parameters=dd.ChatCompletionInferenceParams(
+                timeout=120,
+                max_tokens=4096,
+                max_parallel_requests=8,
+                temperature=0.1,
+                extra_body={"reasoning_effort": "medium"},
+            ),
+        ),
+        dd.ModelConfig(
+            alias="vlm",
+            model="nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
+            provider="nvidia-build",
+            inference_parameters=dd.ChatCompletionInferenceParams(
+                timeout=120,
+                max_tokens=4096,
+                max_parallel_requests=8,
+                extra_body={"reasoning_effort": "medium"},
+            ),
+        ),
+    ]
+
+
+def _openrouter_model_configs() -> list[dd.ModelConfig]:
+    """Ready-to-use Data Designer model configs for OpenRouter."""
+    return [
+        dd.ModelConfig(
+            alias="text-llm",
+            model="nvidia/nemotron-3-super-120b-a12b",
+            provider="openrouter",
+            inference_parameters=dd.ChatCompletionInferenceParams(
+                timeout=120,
+                max_tokens=4096,
+                max_parallel_requests=8,
+                temperature=1.0,
+                top_p=0.95,
+            ),
+        ),
+        dd.ModelConfig(
+            alias="judge-llm",
+            model="qwen/qwen3.6-flash",
+            provider="openrouter",
+            inference_parameters=dd.ChatCompletionInferenceParams(
+                timeout=120,
+                max_tokens=4096,
+                max_parallel_requests=8,
+                temperature=0.1,
+            ),
+        ),
+        dd.ModelConfig(
+            alias="vlm",
+            model="qwen/qwen3.6-flash",
+            provider="openrouter",
+            inference_parameters=dd.ChatCompletionInferenceParams(
+                timeout=120,
+                max_tokens=4096,
+                max_parallel_requests=8,
+            ),
+        ),
+    ]
+
+
+def _openai_model_configs() -> list[dd.ModelConfig]:
+    """Ready-to-use Data Designer model configs for OpenAI."""
+    return [
+        dd.ModelConfig(
+            alias="text-llm",
+            model="gpt-5.4",
+            provider="openai",
+            inference_parameters=dd.ChatCompletionInferenceParams(
+                timeout=120,
+                max_parallel_requests=8,
+                extra_body={"max_completion_tokens": 4096},
+            ),
+        ),
+        dd.ModelConfig(
+            alias="judge-llm",
+            model="gpt-5.4",
+            provider="openai",
+            inference_parameters=dd.ChatCompletionInferenceParams(
+                timeout=120,
+                max_parallel_requests=8,
+                temperature=0.1,
+                extra_body={"max_completion_tokens": 4096},
+            ),
+        ),
+        dd.ModelConfig(
+            alias="vlm",
+            model="gpt-5.4",
+            provider="openai",
+            inference_parameters=dd.ChatCompletionInferenceParams(
+                timeout=120,
+                max_parallel_requests=8,
+                extra_body={"max_completion_tokens": 4096},
+            ),
+        ),
+    ]
+
+
+_DD_MODEL_CONFIG_BUILDERS = {
+    "NVIDIA_API_KEY": _nvidia_build_model_configs,
+    "OPENROUTER_API_KEY": _openrouter_model_configs,
+    "OPENAI_API_KEY": _openai_model_configs,
+}
+
+
 def _build_config(env_var: str, api_key: str) -> ProviderConfig:
     defaults = _PROVIDER_REGISTRY[env_var]
+    model_provider = dd.ModelProvider(
+        name=defaults["provider_name"],
+        endpoint=defaults["endpoint"],
+        provider_type="openai",
+        api_key=env_var,
+    )
     return ProviderConfig(
         env_var=env_var,
         api_key=api_key,
         endpoint=defaults["endpoint"],
         provider_name=defaults["provider_name"],
-        text_model=defaults["text_model"],
-        vlm_model=defaults["vlm_model"],
+        model_providers=[model_provider],
+        model_configs=_DD_MODEL_CONFIG_BUILDERS[env_var](),
     )
 
 
@@ -194,83 +320,22 @@ def environment_setup(provider: str = "auto") -> ProviderConfig:
 
 
 def build_model_providers(provider: ProviderConfig):
-    """Return the shared ``list[ModelProvider]`` used by *both* DD and Anonymizer.
+    """Return the selected ``list[ModelProvider]`` for Data Designer.
 
-    ``anonymizer.ModelProvider`` is literally re-exported from
-    ``data_designer.config.models`` -- the same class. So the same provider list
-    works for ``DataDesigner(model_providers=...)`` and
-    ``Anonymizer(model_providers=...)`` without translation.
+    Kept as a compatibility wrapper for older notebook cells. New cells can use
+    ``provider.model_providers`` directly.
     """
-    import data_designer.config as dd
-
-    return [
-        dd.ModelProvider(
-            name=provider.provider_name,
-            endpoint=provider.endpoint,
-            provider_type="openai",
-            api_key=provider.env_var,
-        ),
-    ]
+    return list(provider.model_providers)
 
 
 def build_dd_model_setup(provider: ProviderConfig):
-    """Return ([model_providers], [model_configs]) wired to the detected provider.
+    """Return ``([model_providers], [model_configs])`` for older notebook cells.
 
-    Used by every notebook that calls an LLM/VLM column. Keeps
-    inference_parameters in one place so we can tune them workshop-wide.
-
-    On NVIDIA Build the default text and vision models are Nemotron models.
-    We pass ``enable_thinking=True`` explicitly so the provider configuration
-    shown in notebooks matches the intended reasoning-mode behavior.
+    ``environment_setup()`` now resolves a complete provider preset, including
+    model-specific Data Designer configs. New cells can use
+    ``provider.model_providers`` and ``provider.model_configs`` directly.
     """
-    import data_designer.config as dd
-
-    model_providers = build_model_providers(provider)
-
-    extra_body: dict | None = None
-    if provider.provider_name == "nvidia-build":
-        extra_body = {"chat_template_kwargs": {"enable_thinking": True}}
-
-    def chat_inference_params(model: str, *, temperature: float | None = None):
-        params: dict = {
-            "timeout": 120,
-            "max_parallel_requests": 8,
-        }
-        if provider.provider_name == "openai" and model == "gpt-5.4":
-            params["extra_body"] = {"max_completion_tokens": 4096}
-        else:
-            params["max_tokens"] = 4096
-            if extra_body:
-                params["extra_body"] = extra_body
-        if temperature is not None:
-            params["temperature"] = temperature
-        return dd.ChatCompletionInferenceParams(**params)
-
-    inference = chat_inference_params(provider.text_model)
-    judge_inference = chat_inference_params(provider.text_model, temperature=0.1)
-    vlm_inference = chat_inference_params(provider.vlm_model)
-
-    model_configs = [
-        dd.ModelConfig(
-            alias=provider.text_alias,
-            model=provider.text_model,
-            provider=provider.provider_name,
-            inference_parameters=inference,
-        ),
-        dd.ModelConfig(
-            alias=provider.judge_alias,
-            model=provider.text_model,
-            provider=provider.provider_name,
-            inference_parameters=judge_inference,
-        ),
-        dd.ModelConfig(
-            alias=provider.vlm_alias,
-            model=provider.vlm_model,
-            provider=provider.provider_name,
-            inference_parameters=vlm_inference,
-        ),
-    ]
-    return model_providers, model_configs
+    return list(provider.model_providers), list(provider.model_configs)
 
 
 # ─── Anonymizer model providers ──────────────────────────────────────────────
@@ -472,8 +537,6 @@ def _anonymizer_kimi_model(provider: ProviderConfig) -> str:
 
 def _brev_gliner_provider():
     """``ModelProvider`` for the workshop's Brev-hosted GLiNER endpoint."""
-    import data_designer.config as dd
-
     return dd.ModelProvider(
         name=_BREV_GLINER_PROVIDER_NAME,
         endpoint=_BREV_GLINER_ENDPOINT,
@@ -487,8 +550,6 @@ def build_anonymizer_model_providers(provider: ProviderConfig):
     Build: one provider (NVIDIA Build) — GLiNER and LLMs both hit integrate.api.
     OpenRouter / OpenAI: attendee provider plus the workshop Brev GLiNER endpoint.
     """
-    import data_designer.config as dd
-
     providers = [
         dd.ModelProvider(
             name=provider.provider_name,
@@ -714,18 +775,29 @@ def load_document_seed() -> pd.DataFrame:
 # ─── Pretty info panel ───────────────────────────────────────────────────────
 
 
+def _inference_summary(params: dd.ChatCompletionInferenceParams) -> str:
+    """Compact display string for the common inference knobs."""
+    fields = ("max_parallel_requests", "timeout", "max_tokens", "temperature", "top_p", "extra_body")
+    parts = []
+    for field in fields:
+        value = getattr(params, field, None)
+        if value is not None:
+            parts.append(f"{field}={value}")
+    return ", ".join(parts)
+
+
 def show_provider_info(provider: ProviderConfig) -> None:
     """Print a Rich panel summarising the resolved provider for the notebook."""
     console = Console()
+    config_lines = [
+        f"[bold]{config.alias}:[/] {config.model}\n"
+        f"  [dim]{_inference_summary(config.inference_parameters)}[/]"
+        for config in provider.model_configs
+    ]
     body = (
         f"[bold]Provider:[/] {provider.provider_name}\n"
         f"[bold]Endpoint:[/] {provider.endpoint}\n"
-        f"[bold]Text model alias:[/] [cyan]{provider.text_alias}[/] "
-        f"-> {provider.text_model}\n"
-        f"[bold]Judge model alias:[/] [cyan]{provider.judge_alias}[/] "
-        f"-> {provider.text_model} (temperature=0.1)\n"
-        f"[bold]VLM model alias:[/] [cyan]{provider.vlm_alias}[/] "
-        f"-> {provider.vlm_model}"
+        f"[bold]Model configs:[/]\n" + "\n".join(config_lines)
     )
     console.print(
         Panel(
