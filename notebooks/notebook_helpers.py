@@ -116,7 +116,6 @@ def _nvidia_build_model_configs() -> list[dd.ModelConfig]:
                 timeout=120,
                 max_tokens=4096,
                 max_parallel_requests=8,
-                extra_body={"reasoning_effort": "medium"},
             ),
         ),
     ]
@@ -192,7 +191,10 @@ def _openai_model_configs() -> list[dd.ModelConfig]:
             inference_parameters=dd.ChatCompletionInferenceParams(
                 timeout=120,
                 max_parallel_requests=8,
-                extra_body={"max_completion_tokens": 4096},
+                extra_body={
+                    "max_completion_tokens": 4096,
+                    "reasoning_effort": "medium",
+                },
             ),
         ),
     ]
